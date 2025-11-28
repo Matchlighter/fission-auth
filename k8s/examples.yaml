@@ -1,0 +1,36 @@
+# Example FunctionAccessRule
+# This allows same-namespace calls and specific cross-namespace calls
+---
+apiVersion: fission.io/v1
+kind: FunctionAccessRule
+metadata:
+  name: allow-same-namespace
+  namespace: default
+spec:
+  targetFunction: "*"
+  allowedNamespaces:
+    - default
+  allowExternal: false
+
+---
+apiVersion: fission.io/v1
+kind: FunctionAccessRule
+metadata:
+  name: allow-monitoring
+  namespace: default
+spec:
+  targetFunction: "metrics-*"
+  allowedNamespaces:
+    - default
+    - monitoring
+  allowExternal: false
+
+---
+apiVersion: fission.io/v1
+kind: FunctionAccessRule
+metadata:
+  name: public-api
+  namespace: default
+spec:
+  targetFunction: "public-*"
+  allowExternal: true

@@ -1,0 +1,50 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: functionaccessrules.fission.io
+spec:
+  group: fission.io
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                targetFunction:
+                  type: string
+                  description: "Name or pattern of the function this rule applies to (* for all)"
+                allowedNamespaces:
+                  type: array
+                  items:
+                    type: string
+                  description: "List of namespaces allowed to call this function"
+                allowExternal:
+                  type: boolean
+                  description: "Whether to allow external (non-cluster) requests"
+                  default: false
+                denyNamespaces:
+                  type: array
+                  items:
+                    type: string
+                  description: "List of namespaces explicitly denied"
+                requirePodLabels:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: "Required labels on calling pod"
+              required:
+                - targetFunction
+  scope: Namespaced
+  names:
+    plural: functionaccessrules
+    singular: functionaccessrule
+    kind: FunctionAccessRule
+    shortNames:
+    - far
+    - funcaccess
