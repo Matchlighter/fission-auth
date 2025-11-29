@@ -25,19 +25,25 @@ Ingress/Gateway → Fission Auth (forward_auth) → Fission Router → Function
 
 ## CRD: FunctionAccessRule
 
-Access rules are defined per-namespace and control which callers can invoke functions.
+Access rules are defined per-namespace and control which callers can invoke functions. The design follows Kubernetes NetworkPolicy patterns for familiar, powerful access control.
 
 ### Fields
 
 - `targetFunction` (string, required): Function name or pattern (* for all, prefix*, *suffix)
-- `allowedNamespaces` (array): List of namespaces allowed to call this function
-- `allowExternal` (bool): Whether to allow external (non-cluster) requests
-- `denyNamespaces` (array): Namespaces explicitly denied
-- `requirePodLabels` (object): Required labels on calling pod
+- `from` (array): List of allowed sources using NetworkPolicy-style peer selectors
+  - `ipBlock`: CIDR-based IP allowlist (for external requests)
+    - `cidr`: IP range (e.g., "203.0.113.0/24")
+    - `except`: List of excluded IPs within the CIDR
+  - `namespaceSelector`: Select namespaces by labels
+    - `matchLabels`: Key-value label pairs
+    - `matchExpressions`: Advanced label matching with operators
+  - `podSelector`: Select pods by labels
+    - `matchLabels`: Key-value label pairs
+    - `matchExpressions`: Advanced label matching with operators
 
 ### Examples
 
-Allow same-namespace calls:
+Allow same-namespace calls (using namespace selector):
 ```yaml
 apiVersion: fission.io/v1
 kind: FunctionAccessRule
@@ -46,11 +52,13 @@ metadata:
   namespace: default
 spec:
   targetFunction: "*"
-  allowedNamespaces:
-    - default
+  from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: default
 ```
 
-Allow cross-namespace for monitoring:
+Allow cross-namespace for monitoring (namespace selector):
 ```yaml
 apiVersion: fission.io/v1
 kind: FunctionAccessRule
@@ -59,12 +67,33 @@ metadata:
   namespace: default
 spec:
   targetFunction: "metrics-*"
-  allowedNamespaces:
-    - default
-    - monitoring
+  from:
+    - namespaceSelector:
+        matchExpressions:
+          - key: environment
+            operator: In
+            values:
+              - production
+              - staging
 ```
 
-Allow external access:
+Allow specific pods with labels:
+```yaml
+apiVersion: fission.io/v1
+kind: FunctionAccessRule
+metadata:
+  name: allow-backend-pods
+  namespace: default
+spec:
+  targetFunction: "internal-*"
+  from:
+    - podSelector:
+        matchLabels:
+          app: backend
+          role: api
+```
+
+Allow external access from specific IP range:
 ```yaml
 apiVersion: fission.io/v1
 kind: FunctionAccessRule
@@ -73,7 +102,31 @@ metadata:
   namespace: default
 spec:
   targetFunction: "public-*"
-  allowExternal: true
+  from:
+    - ipBlock:
+        cidr: 0.0.0.0/0  # Allow all external IPs
+        except:
+          - 10.0.0.0/8    # Except internal ranges
+          - 172.16.0.0/12
+          - 192.168.0.0/16
+```
+
+Combined namespace and pod selectors:
+```yaml
+apiVersion: fission.io/v1
+kind: FunctionAccessRule
+metadata:
+  name: admin-access
+  namespace: admin
+spec:
+  targetFunction: "admin-*"
+  from:
+    - namespaceSelector:
+        matchLabels:
+          security: privileged
+      podSelector:
+        matchLabels:
+          role: admin
 ```
 
 ## Configuration
