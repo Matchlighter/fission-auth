@@ -2,7 +2,7 @@
 set -e
 
 echo "Installing dependencies..."
-# shards install
+shards install
 
 echo "Building Crystal fission-auth..."
 crystal build --release main.cr -o fission-auth
