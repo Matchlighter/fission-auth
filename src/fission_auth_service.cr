@@ -15,6 +15,8 @@ class FissionAuthService
   @pod_watcher_url : String
   @rules_cache = Hash(String, Array(Kubernetes::Resource(FunctionAccessRule))).new
   @cache_mutex = Mutex.new
+  @namespace_cache = Hash(String, Hash(String, String)).new
+  @namespace_cache_mutex = Mutex.new
 
   def initialize
     @k8s = Kubernetes::Client.new
@@ -22,11 +24,13 @@ class FissionAuthService
     Log.info { "Initialized Fission Auth Service" }
     Log.info { "Pod Watcher URL: #{@pod_watcher_url}" }
 
-    # Do initial load of all rules
+    # Do initial load of all rules and namespaces
     load_all_rules
+    load_namespace_labels
 
-    # Start watching for rule changes
+    # Start watching for changes
     spawn_watch_rules
+    spawn_watch_namespaces
   end
 
   def load_all_rules
@@ -45,6 +49,52 @@ class FissionAuthService
     end
 
     Log.info { "Loaded rules from #{@rules_cache.size} namespaces" }
+  end
+
+  def load_namespace_labels
+    Log.info { "Loading namespace labels..." }
+
+    @namespace_cache_mutex.synchronize do
+      @namespace_cache.clear
+      @k8s.namespaces.each do |ns|
+        labels = ns.metadata.labels || {} of String => String
+        @namespace_cache[ns.metadata.name] = labels
+      end
+    end
+
+    Log.info { "Loaded labels for #{@namespace_cache.size} namespaces" }
+  end
+
+  def spawn_watch_namespaces
+    spawn do
+      loop do
+        begin
+          Log.debug { "Starting watch on Namespace resources..." }
+
+          @k8s.watch_namespaces() do |watch|
+            ns = watch.object
+
+            @namespace_cache_mutex.synchronize do
+              case watch
+              when .added?, .modified?
+                labels = ns.metadata.labels || {} of String => String
+                @namespace_cache[ns.metadata.name] = labels
+                Log.debug { "Updated namespace labels cache for #{ns.metadata.name}" }
+              when .deleted?
+                @namespace_cache.delete(ns.metadata.name)
+                Log.debug { "Removed namespace from cache: #{ns.metadata.name}" }
+              end
+            end
+          end
+
+          Log.warn { "Namespace watch connection closed, reconnecting in 5 seconds..." }
+          sleep 5.seconds
+        rescue ex
+          Log.error { "Error in namespace watch loop: #{ex.message}" }
+          sleep 5.seconds
+        end
+      end
+    end
   end
 
   def spawn_watch_rules
@@ -165,26 +215,27 @@ class FissionAuthService
   end
 
   def matches_namespace_selector?(namespace : String, selector) : Bool
-    # Get namespace labels from Kubernetes
-    begin
-      ns_resource = @k8s.namespace(namespace)
-      return false unless ns_resource
-
-      ns_labels = ns_resource.metadata.labels || {} of String => String
-
-      # Check matchLabels
-      if match_labels = selector.match_labels
-        match_labels.each do |key, value|
-          return false unless ns_labels[key]? == value
-        end
-      end
-
-      # TODO: Implement matchExpressions if needed
-
-      true
-    rescue
-      false
+    # Get namespace labels from cache instead of making API call
+    ns_labels = @namespace_cache_mutex.synchronize do
+      @namespace_cache[namespace]?
     end
+
+    return false unless ns_labels
+
+    # Check matchLabels
+    if match_labels = selector.match_labels
+      match_labels.each do |key, value|
+        # Convert JSON::Any to String for comparison
+        value_str = value.as_s? || value.to_s
+        return false unless ns_labels[key]? == value_str
+      end
+    end
+
+    # TODO: Implement matchExpressions if needed
+
+    true
+  rescue
+    false
   end
 
   def matches_pod_selector?(pod_labels : Hash(String, JSON::Any), selector) : Bool
