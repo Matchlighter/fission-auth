@@ -24,28 +24,34 @@ spec:
 
                 from:
                   type: array
+                  default: []
                   description: "List of allowed sources (NetworkPolicy-style peer)"
                   items:
                     type: object
                     properties:
                       ipBlock:
                         type: object
+                        nullable: true
                         properties:
                           cidr:
                             type: string
                           except:
                             type: array
+                            default: []
                             items:
                               type: string
                       namespaceSelector:
                         type: object
+                        nullable: true
                         properties:
                           matchLabels:
                             type: object
+                            nullable: true
                             additionalProperties:
                               type: string
                           matchExpressions:
                             type: array
+                            nullable: true
                             items:
                               type: object
                               properties:
@@ -59,13 +65,16 @@ spec:
                                     type: string
                       podSelector:
                         type: object
+                        nullable: true
                         properties:
                           matchLabels:
                             type: object
+                            nullable: true
                             additionalProperties:
                               type: string
                           matchExpressions:
                             type: array
+                            nullable: true
                             items:
                               type: object
                               properties:
