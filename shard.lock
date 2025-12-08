@@ -8,6 +8,10 @@ shards:
     git: https://github.com/matchlighter/crystal-kubernetes.git
     version: 0.1.0+git.commit.3e181bbf7a1607c68665fb91d90c1315670a3415
 
+  netmask:
+    git: https://github.com/plambert/netmask.cr.git
+    version: 1.0.0+git.commit.2e617dc521d21bd12b01f4c23f8b3173b48cac20
+
   webmock:
     git: https://github.com/manastech/webmock.cr.git
     version: 0.14.0

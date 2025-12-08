@@ -1,7 +1,6 @@
 require "json"
 require "kubernetes"
-
-require "./util"
+require "netmask"
 
 # Fission Forward Auth Microservice
 # Validates incoming requests to FaaS functions based on CRD access rules
@@ -196,24 +195,6 @@ class FissionAuthService
     end
   end
 
-  def matches_ip_block?(ip : String, ip_block) : Bool
-    # Parse CIDR and check if IP is in range
-    cidr = ip_block.cidr
-
-    return false unless cidr_matches?(ip, cidr)
-
-    # Check except list
-    if except_list = ip_block.except
-      except_list.each do |except_cidr|
-        return false if cidr_matches?(ip, except_cidr)
-      end
-    end
-
-    true
-  rescue
-    false
-  end
-
   def matches_namespace_selector?(namespace : String, selector) : Bool
     # Get namespace labels from cache instead of making API call
     ns_labels = @namespace_cache_mutex.synchronize do
@@ -281,7 +262,9 @@ class FissionAuthService
         next false unless rule.spec.from
 
         rule.spec.from.not_nil!.any? do |peer|
-          peer.ip_block && matches_ip_block?(real_ip, peer.ip_block.not_nil!)
+          next false unless peer.ip_block
+          nm = Netmask.new(peer.ip_block.not_nil!.cidr)
+          nm.matches?(real_ip)
         end
       end
 

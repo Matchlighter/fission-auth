@@ -19,7 +19,7 @@ spec:
       containers:
       - name: fission-auth
         image: ghcr.io/matchlighter/fission-auth:latest
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
           name: http

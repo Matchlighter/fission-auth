@@ -87,41 +87,6 @@ describe FissionAuthService do
     end
   end
 
-  describe "#matches_ip_block?" do
-    service = FissionAuthService.allocate
-
-    it "matches IP in CIDR range" do
-      ip_block = MockIPBlock.new("10.0.0.0/16", nil)
-      service.matches_ip_block?("10.0.5.10", ip_block).should be_true
-      service.matches_ip_block?("10.1.0.1", ip_block).should be_false
-    end
-
-    it "matches IP in /24 range" do
-      ip_block = MockIPBlock.new("192.168.1.0/24", nil)
-      service.matches_ip_block?("192.168.1.50", ip_block).should be_true
-      service.matches_ip_block?("192.168.2.50", ip_block).should be_false
-    end
-
-    it "excludes IPs in except list" do
-      ip_block = MockIPBlock.new("10.0.0.0/16", ["10.0.1.0/24"])
-      service.matches_ip_block?("10.0.0.50", ip_block).should be_true
-      service.matches_ip_block?("10.0.1.50", ip_block).should be_false
-      service.matches_ip_block?("10.0.2.50", ip_block).should be_true
-    end
-
-    it "handles multiple except ranges" do
-      ip_block = MockIPBlock.new("172.16.0.0/12", ["172.16.0.0/16", "172.20.0.0/16"])
-      service.matches_ip_block?("172.17.1.1", ip_block).should be_true
-      service.matches_ip_block?("172.16.1.1", ip_block).should be_false
-      service.matches_ip_block?("172.20.1.1", ip_block).should be_false
-    end
-
-    it "returns false for invalid CIDR" do
-      ip_block = MockIPBlock.new("invalid", nil)
-      service.matches_ip_block?("10.0.0.1", ip_block).should be_false
-    end
-  end
-
   describe "#matches_pod_selector?" do
     service = FissionAuthService.allocate
 
