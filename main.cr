@@ -23,13 +23,13 @@ server = HTTP::Server.new do |context|
     context.response.content_type = "application/json"
     context.response.status_code = 200
     context.response.print({"status" => "ready"}.to_json)
-  else
+  when {"GET", "/authorize"}
     # Forward auth check
     real_ip = context.request.headers["X-Real-IP"]? ||
               context.request.headers["X-Forwarded-For"]?.try(&.split(",").first.strip) ||
               context.request.remote_address.try(&.to_s) || "unknown"
 
-    request_path = context.request.headers["X-Original-URI"]? || context.request.path
+    request_path = context.request.headers["X-Forwarded-Uri"]? || context.request.path
 
     Log.info { "Auth check: #{context.request.method} #{request_path} from #{real_ip}" }
 
