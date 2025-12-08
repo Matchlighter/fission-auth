@@ -11,7 +11,10 @@ license: MIT
 dependencies:
   kubernetes:
     github: Matchlighter/crystal-kubernetes
-    branch: support-token-auth
+
+development_dependencies:
+  webmock:
+    github: manastech/webmock.cr
 
 targets:
   fission-auth:

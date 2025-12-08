@@ -226,8 +226,7 @@ class FissionAuthService
     if match_labels = selector.match_labels
       match_labels.each do |key, value|
         # Convert JSON::Any to String for comparison
-        value_str = value.as_s? || value.to_s
-        return false unless ns_labels[key]? == value_str
+        return false unless ns_labels[key]? == value
       end
     end
 
@@ -238,17 +237,11 @@ class FissionAuthService
     false
   end
 
-  def matches_pod_selector?(pod_labels : Hash(String, JSON::Any), selector) : Bool
-    # Convert JSON::Any to String for comparison
-    pod_labels_str = {} of String => String
-    pod_labels.each do |k, v|
-      pod_labels_str[k] = v.as_s? || v.to_s
-    end
-
+  def matches_pod_selector?(pod_labels : Hash(String, String), selector) : Bool
     # Check matchLabels
     if match_labels = selector.match_labels
       match_labels.each do |key, value|
-        return false unless pod_labels_str[key]? == value
+        return false unless pod_labels[key]? == value
       end
     end
 
@@ -302,7 +295,7 @@ class FissionAuthService
     # Extract source pod information
     source_namespace = pod_metadata["namespace"].as_s
     source_pod = pod_metadata["name"].as_s
-    source_labels = pod_metadata["labels"]?.try(&.as_h) || {} of String => JSON::Any
+    source_labels = pod_metadata["labels"]?.try(&.as_h).as?(Hash(String, String)) || {} of String => String
 
     Log.info { "Source: #{source_namespace}/#{source_pod}" }
 

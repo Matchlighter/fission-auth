@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile for Crystal Fission Auth
-FROM crystallang/crystal:1.14.0-alpine as builder
+FROM crystallang/crystal:1.14.0-alpine AS builder
 
 WORKDIR /app
 
@@ -11,6 +11,7 @@ RUN shards install --production
 
 # Copy source code and CRD
 COPY main.cr .
+COPY src/ src/
 COPY k8s/crd-functionaccessrule.yaml k8s/
 
 # Build the application (statically linked)
