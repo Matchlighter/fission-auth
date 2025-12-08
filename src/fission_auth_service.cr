@@ -170,15 +170,15 @@ class FissionAuthService
   def extract_function_info(path : String) : {namespace: String?, function: String?}
     # Path format: /namespace/function or /function
     parts = path.split("/").reject(&.empty?)
+    parts.shift if parts[0] == ""
 
-    case parts.size
-    when 0
-      {namespace: nil, function: nil}
-    when 1
-      {namespace: nil, function: parts[0]}
-    else
-      {namespace: parts[0], function: parts[1]}
+    if @namespace_cache.has_key?(parts[0])
+      # First part is a namespace
+      namespace = parts.shift
+      return {namespace: namespace, function: parts.join("/")}
     end
+
+    {namespace: "default", function: parts.join("/")}
   end
 
   def matches_pattern?(function : String, pattern : String) : Bool
@@ -242,7 +242,7 @@ class FissionAuthService
     end
 
     target_function = func_info[:function].not_nil!
-    target_namespace = func_info[:namespace] || "default"
+    target_namespace = func_info[:namespace].not_nil!
 
     Log.info { "Checking auth for function #{target_namespace}/#{target_function} from IP #{real_ip}" }
 
