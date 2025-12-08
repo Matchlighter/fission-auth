@@ -249,55 +249,18 @@ class FissionAuthService
     # Get pod metadata from pod-watcher
     pod_metadata = get_pod_metadata(real_ip)
 
-    if pod_metadata.nil?
-      # Not a pod in the cluster - could be external
-      Log.info { "No pod found for IP #{real_ip} - treating as external" }
-      headers["X-Source-Type"] = "external"
-
-      # Check if any rule allows external access via ipBlock
-      rules = get_rules_for_namespace(target_namespace)
-
-      matching_rule = rules.find do |rule|
-        next false unless matches_pattern?(target_function, rule.spec.target_function)
-        next false unless rule.spec.from
-
-        rule.spec.from.not_nil!.any? do |peer|
-          next false unless peer.ip_block
-          nm = Netmask.new(peer.ip_block.not_nil!.cidr)
-          nm.matches?(real_ip)
-        end
-      end
-
-      if matching_rule
-        return {allowed: true, reason: "External access allowed by ipBlock rule", headers: headers}
-      else
-        return {allowed: false, reason: "External access denied", headers: headers}
-      end
-    end
-
     # Extract source pod information
-    source_namespace = pod_metadata["namespace"].as_s
-    source_pod = pod_metadata["name"].as_s
-    source_labels = pod_metadata["labels"]?.try(&.as_h).as?(Hash(String, String)) || {} of String => String
+    source_namespace = pod_metadata.try(&.["namespace"].as_s)
+    source_pod = pod_metadata.try(&.["name"].as_s)
 
     Log.info { "Source: #{source_namespace}/#{source_pod}" }
 
-    headers["X-Source-Namespace"] = source_namespace
-    headers["X-Source-Pod"] = source_pod
-    headers["X-Source-Type"] = "cluster"
+    headers["X-Source-Namespace"] = source_namespace || ""
+    headers["X-Source-Pod"] = source_pod || ""
+    headers["X-Source-Type"] = pod_metadata ? "cluster" : "external"
 
     # Get access rules for the target namespace
     rules = get_rules_for_namespace(target_namespace)
-
-    if rules.empty?
-      Log.info { "No access rules defined for namespace #{target_namespace}" }
-      # Default policy: allow same-namespace
-      if source_namespace == target_namespace
-        return {allowed: true, reason: "Same namespace (no rules defined)", headers: headers}
-      else
-        return {allowed: false, reason: "Cross-namespace denied (no rules defined)", headers: headers}
-      end
-    end
 
     # Find matching rules
     matching_rules = rules.select do |rule|
@@ -324,14 +287,27 @@ class FissionAuthService
       from_peers.each do |peer|
         # Check namespaceSelector
         if ns_selector = peer.namespace_selector
-          unless matches_namespace_selector?(source_namespace, ns_selector)
+          next unless pod_metadata
+
+          unless matches_namespace_selector?(source_namespace.as(String), ns_selector)
             next
           end
         end
 
         # Check podSelector
         if pod_selector = peer.pod_selector
-          unless matches_pod_selector?(source_labels, pod_selector)
+          next unless pod_metadata
+
+          source_pod_labels = pod_metadata["labels"]?.try(&.as_h).as?(Hash(String, String)) || {} of String => String
+          unless matches_pod_selector?(source_pod_labels, pod_selector)
+            next
+          end
+        end
+
+        # Check ipBlock
+        if ip_block = peer.ip_block
+          nm = Netmask.new(ip_block.not_nil!.cidr)
+          unless nm.matches?(real_ip)
             next
           end
         end
