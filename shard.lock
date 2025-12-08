@@ -6,7 +6,7 @@ shards:
 
   kubernetes:
     git: https://github.com/matchlighter/crystal-kubernetes.git
-    version: 0.1.0+git.commit.bc42f7d96bed666e01a328f8ed00004b69f175fc
+    version: 0.1.0+git.commit.3e181bbf7a1607c68665fb91d90c1315670a3415
 
   webmock:
     git: https://github.com/manastech/webmock.cr.git

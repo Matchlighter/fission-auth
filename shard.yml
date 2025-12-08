@@ -11,6 +11,7 @@ license: MIT
 dependencies:
   kubernetes:
     github: Matchlighter/crystal-kubernetes
+    # path: ../crystal-kubernetes
 
 development_dependencies:
   webmock:
