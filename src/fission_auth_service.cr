@@ -1,5 +1,6 @@
 require "json"
 require "kubernetes"
+require "uri"
 require "netmask"
 
 # Fission Forward Auth Microservice
@@ -182,16 +183,15 @@ class FissionAuthService
   end
 
   def matches_pattern?(function : String, pattern : String) : Bool
+    function = function + "/" unless function.ends_with?("/")
+
     if pattern == "*"
       true
     elsif pattern.ends_with?("*")
       prefix = pattern[0..-2]
       function.starts_with?(prefix)
-    elsif pattern.starts_with?("*")
-      suffix = pattern[1..]
-      function.ends_with?(suffix)
     else
-      function == pattern
+      function == pattern || function == (pattern + "/")
     end
   end
 
@@ -246,10 +246,10 @@ class FissionAuthService
       return {allowed: false, reason: "Cannot determine target function", headers: headers}
     end
 
-    target_function = func_info[:function].not_nil!
     target_namespace = func_info[:namespace].not_nil!
+    function_uri = URI.parse(func_info[:function].not_nil!)
 
-    Log.info { "Checking auth for function #{target_namespace}/#{target_function} from IP #{real_ip}" }
+    Log.info { "Checking auth for function #{target_namespace}/#{function_uri.path} from IP #{real_ip}" }
 
     # Get pod metadata from pod-watcher
     pod_metadata = get_pod_metadata(real_ip)
@@ -269,11 +269,11 @@ class FissionAuthService
 
     # Find matching rules
     matching_rules = rules.select do |rule|
-      matches_pattern?(target_function, rule.spec.target_function)
+      matches_pattern?(function_uri.path, rule.spec.target_function)
     end
 
     if matching_rules.empty?
-      Log.info { "No rules match function #{target_function}" }
+      Log.info { "No rules match function #{function_uri.path}" }
       # No explicit rule - default deny for cross-namespace
       if source_namespace == target_namespace
         return {allowed: true, reason: "Same namespace (no matching rule)", headers: headers}
