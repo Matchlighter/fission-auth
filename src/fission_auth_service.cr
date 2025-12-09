@@ -203,6 +203,11 @@ class FissionAuthService
 
     return false unless ns_labels
 
+    # Check name
+    if name = selector.name
+      return false unless namespace == name
+    end
+
     # Check matchLabels
     if match_labels = selector.match_labels
       match_labels.each do |key, value|
