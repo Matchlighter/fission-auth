@@ -24,74 +24,30 @@ class FissionAuthService
     Log.info { "Initialized Fission Auth Service" }
     Log.info { "Pod Watcher URL: #{@pod_watcher_url}" }
 
-    # Do initial load of all rules and namespaces
-    load_all_rules
-    load_namespace_labels
-
     # Start watching for changes
-    spawn_watch_rules
     spawn_watch_namespaces
-  end
-
-  def load_all_rules
-    Log.info { "Loading all access rules..." }
-
-    # Get all namespaces and fetch rules from each
-    @cache_mutex.synchronize do
-      @rules_cache.clear
-
-      rules = @k8s.functionaccessrules(namespace: nil)
-      rules.each do |rule|
-        ns = rule.metadata.namespace
-        @rules_cache[ns] ||= [] of Kubernetes::Resource(FunctionAccessRule)
-        @rules_cache[ns] << rule
-      end
-    end
-
-    Log.info { "Loaded rules from #{@rules_cache.size} namespaces" }
-  end
-
-  def load_namespace_labels
-    Log.info { "Loading namespace labels..." }
-
-    @namespace_cache_mutex.synchronize do
-      @namespace_cache.clear
-      @k8s.namespaces.each do |ns|
-        labels = ns.metadata.labels || {} of String => String
-        @namespace_cache[ns.metadata.name] = labels
-      end
-    end
-
-    Log.info { "Loaded labels for #{@namespace_cache.size} namespaces" }
+    spawn_watch_rules
   end
 
   def spawn_watch_namespaces
     spawn do
-      loop do
-        begin
-          Log.debug { "Starting watch on Namespace resources..." }
+      Log.info { "Starting watch on Namespace resources..." }
 
-          @k8s.watch_namespaces() do |watch|
-            ns = watch.object
+      @k8s.watch_namespaces() do |watch|
+        ns = watch.object
 
-            @namespace_cache_mutex.synchronize do
-              case watch
-              when .added?, .modified?
-                labels = ns.metadata.labels || {} of String => String
-                @namespace_cache[ns.metadata.name] = labels
-                Log.debug { "Updated namespace labels cache for #{ns.metadata.name}" }
-              when .deleted?
-                @namespace_cache.delete(ns.metadata.name)
-                Log.debug { "Removed namespace from cache: #{ns.metadata.name}" }
-              end
-            end
+        @namespace_cache_mutex.synchronize do
+          case watch
+          when .added?, .modified?
+            labels = ns.metadata.labels || {} of String => String
+            @namespace_cache[ns.metadata.name] = labels
+            Log.debug { "Updated namespace labels cache for #{ns.metadata.name}" }
+          when .deleted?
+            @namespace_cache.delete(ns.metadata.name)
+            Log.debug { "Removed namespace from cache: #{ns.metadata.name}" }
+          when .error?
+            Log.error { "Error watching namespaces: #{watch.object}" }
           end
-
-          Log.warn { "Namespace watch connection closed, reconnecting in 5 seconds..." }
-          sleep 5.seconds
-        rescue ex
-          Log.error { "Error in namespace watch loop: #{ex.message}" }
-          sleep 5.seconds
         end
       end
     end
@@ -99,51 +55,40 @@ class FissionAuthService
 
   def spawn_watch_rules
     spawn do
-      loop do
-        begin
-          Log.info { "Starting watch on FunctionAccessRule resources..." }
+      Log.info { "Starting watch on FunctionAccessRule resources..." }
 
-          # Watch all namespaces
-          @k8s.watch_functionaccessrules() do |watch|
-            rule = watch.object
-            namespace = rule.metadata.namespace
+      # Watch all namespaces
+      @k8s.watch_functionaccessrules() do |watch|
+        rule = watch.object
+        namespace = rule.metadata.namespace
 
-            @cache_mutex.synchronize do
-              case watch
-              when .added?, .modified?
-                # Reload all rules for this namespace to keep cache consistent
-                begin
-                  rules = @k8s.functionaccessrules(namespace: namespace)
-                  if rules.size > 0
-                    @rules_cache[namespace] = rules.to_a
-                  else
-                    @rules_cache.delete(namespace)
-                  end
-                rescue ex
-                  Log.error { "Error reloading rules for namespace #{namespace}: #{ex.message}" }
-                end
-              when .deleted?
-                # Reload all rules for this namespace
-                begin
-                  rules = @k8s.functionaccessrules(namespace: namespace)
-                  if rules.size > 0
-                    @rules_cache[namespace] = rules.to_a
-                  else
-                    @rules_cache.delete(namespace)
-                  end
-                rescue ex
-                  Log.error { "Error reloading rules for namespace #{namespace}: #{ex.message}" }
-                end
+        @cache_mutex.synchronize do
+          case watch
+          when .added?, .modified?
+            # Reload all rules for this namespace to keep cache consistent
+            begin
+              rules = @k8s.functionaccessrules(namespace: namespace)
+              if rules.size > 0
+                @rules_cache[namespace] = rules.to_a
+              else
+                @rules_cache.delete(namespace)
               end
+            rescue ex
+              Log.error { "Error reloading rules for namespace #{namespace}: #{ex.message}" }
+            end
+          when .deleted?
+            # Reload all rules for this namespace
+            begin
+              rules = @k8s.functionaccessrules(namespace: namespace)
+              if rules.size > 0
+                @rules_cache[namespace] = rules.to_a
+              else
+                @rules_cache.delete(namespace)
+              end
+            rescue ex
+              Log.error { "Error reloading rules for namespace #{namespace}: #{ex.message}" }
             end
           end
-
-          Log.warn { "Watch connection closed, reconnecting in 5 seconds..." }
-          sleep 5.seconds
-        rescue ex
-          Log.error { "Error in watch loop: #{ex.message}" }
-          Log.error { ex.backtrace.join("\n") }
-          sleep 5.seconds
         end
       end
     end
