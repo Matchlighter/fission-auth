@@ -14,11 +14,8 @@ class FissionAuthService
   @k8s : Kubernetes::Client
   @pod_watcher_url : String
 
-  @cache_mutex = Mutex.new
-  @rules_cache = Hash(String, Hash(String, FunctionAccessRule)).new
-
-  @namespace_cache_mutex = Mutex.new
-  @namespace_cache = Hash(String, Hash(String, String)).new
+  @namespace_store : Kubernetes::SyncedStore(Kubernetes::Namespace)
+  @rules_store : Kubernetes::SyncedStore(Kubernetes::Resource(FunctionAccessRule))
 
   def initialize
     @k8s = Kubernetes::Client.new
@@ -26,69 +23,15 @@ class FissionAuthService
     Log.info { "Initialized Fission Auth Service" }
     Log.info { "Pod Watcher URL: #{@pod_watcher_url}" }
 
-    # Start watching for changes
-    spawn_watch_namespaces
-    spawn_watch_rules
+    @namespace_store = @k8s.create_synced_store(Kubernetes::Namespace, "api/v1/namespaces")
+    @rules_store = @k8s.create_synced_store(Kubernetes::Resource(FunctionAccessRule), "apis/fission.io/v1/functionaccessrules")
   end
 
-  def spawn_watch_namespaces
-    spawn do
-      Log.info { "Starting watch on Namespace resources..." }
-
-      @k8s.watch_namespaces() do |watch|
-        ns = watch.object
-
-        @namespace_cache_mutex.synchronize do
-          case watch
-          when .added?, .modified?
-            labels = ns.metadata.labels || {} of String => String
-            @namespace_cache[ns.metadata.name] = labels
-            Log.debug { "Updated namespace labels cache for #{ns.metadata.name}" }
-          when .deleted?
-            @namespace_cache.delete(ns.metadata.name)
-            Log.debug { "Removed namespace from cache: #{ns.metadata.name}" }
-          end
-        end
-      end
-    end
-  end
-
-  def spawn_watch_rules
-    spawn do
-      Log.info { "Starting watch on FunctionAccessRule resources..." }
-
-      # Watch all namespaces
-      @k8s.watch_functionaccessrules() do |watch|
-        rule = watch.object
-        namespace = rule.metadata.namespace
-
-        @cache_mutex.synchronize do
-          @rules_cache[namespace] ||= {} of String => FunctionAccessRule
-
-          case watch
-          when .added?, .modified?
-            @rules_cache[namespace][rule.metadata.name] = rule.spec
-            Log.debug { "Updated FunctionAccessRule cache for #{namespace}/#{rule.metadata.name}" }
-          when .deleted?
-            @rules_cache[namespace].delete(rule.metadata.name)
-            Log.debug { "Removed FunctionAccessRule from cache: #{namespace}/#{rule.metadata.name}" }
-          end
-        end
-      end
-    end
-  end
-
-  def get_rules_for_namespace(namespace : String) : Array(FunctionAccessRule)
-    @cache_mutex.synchronize do
-      @rules_cache[namespace].try(&.values) || [] of FunctionAccessRule
-    end
-  end
-
-  def get_pod_metadata(ip : String) : JSON::Any?
+  def get_pod_metadata(ip : String) : Kubernetes::Pod::Metadata?
     response = HTTP::Client.get("#{@pod_watcher_url}/pod?ip=#{ip}")
 
     if response.status_code == 200
-      JSON.parse(response.body)
+      Kubernetes::Pod::Metadata.from_json(response.body_io)
     else
       nil
     end
@@ -102,7 +45,7 @@ class FissionAuthService
     parts = path.split("/").reject(&.empty?)
     parts.shift if parts[0] == ""
 
-    if @namespace_cache.has_key?(parts[0])
+    if @namespace_store[parts[0]]
       # First part is a namespace
       namespace = parts.shift
       return {namespace: namespace, function: parts.join("/")}
@@ -124,45 +67,26 @@ class FissionAuthService
     end
   end
 
-  def matches_namespace_selector?(namespace : String, selector) : Bool
-    # Get namespace labels from cache instead of making API call
-    ns_labels = @namespace_cache_mutex.synchronize do
-      @namespace_cache[namespace]?
-    end
-
-    return false unless ns_labels
-
+  def matches_selector?(meta, selector) : Bool
     # Check name
-    if name = selector.name
-      return false unless namespace == name
+    if selector.responds_to?(:name) && (match_name = selector.name)
+      return false unless match_name == meta.name
     end
 
     # Check matchLabels
     if match_labels = selector.match_labels
+      obj_labels = meta.labels
       match_labels.each do |key, value|
         # Convert JSON::Any to String for comparison
-        return false unless ns_labels[key]? == value
+        return false unless obj_labels[key]? == value
       end
     end
 
-    # TODO: Implement matchExpressions if needed
+    # TODO: Implement matchExpressions
 
     true
   rescue
     false
-  end
-
-  def matches_pod_selector?(pod_labels : Hash(String, String), selector) : Bool
-    # Check matchLabels
-    if match_labels = selector.match_labels
-      match_labels.each do |key, value|
-        return false unless pod_labels[key]? == value
-      end
-    end
-
-    # TODO: Implement matchExpressions if needed
-
-    true
   end
 
   def check_authorization(real_ip : String, request_path : String) : {allowed: Bool, reason: String, headers: Hash(String, String)}
@@ -175,29 +99,24 @@ class FissionAuthService
       return {allowed: false, reason: "Cannot determine target function", headers: headers}
     end
 
-    target_namespace = func_info[:namespace].not_nil!
     function_uri = URI.parse(func_info[:function].not_nil!)
+    target_namespace = @namespace_store[func_info[:namespace].not_nil!]
 
     Log.info { "Checking auth for function #{target_namespace}/#{function_uri.path} from IP #{real_ip}" }
 
-    # Get pod metadata from pod-watcher
+    # Get source pod metadata
     pod_metadata = get_pod_metadata(real_ip)
+    source_namespace = pod_metadata ? @namespace_store[pod_metadata.namespace] : nil
 
-    # Extract source pod information
-    source_namespace = pod_metadata.try(&.["namespace"].as_s)
-    source_pod = pod_metadata.try(&.["name"].as_s)
+    Log.info { "Source: #{pod_metadata.try(&.namespace)}/#{pod_metadata.try(&.name)}" }
 
-    Log.info { "Source: #{source_namespace}/#{source_pod}" }
-
-    headers["X-Source-Namespace"] = source_namespace || ""
-    headers["X-Source-Pod"] = source_pod || ""
+    headers["X-Source-Namespace"] = pod_metadata.try(&.namespace) || ""
+    headers["X-Source-Pod"] = pod_metadata.try(&.name) || ""
     headers["X-Source-Type"] = pod_metadata ? "cluster" : "external"
 
-    # Get access rules for the target namespace
-    rules = get_rules_for_namespace(target_namespace)
-
     # Find matching rules
-    matching_rules = rules.select do |rule|
+    namespace_rules = @rules_store.all_for(target_namespace).map(&.spec)
+    matching_rules = namespace_rules.select do |rule|
       matches_pattern?(function_uri.path, rule.target_function)
     end
 
@@ -221,29 +140,20 @@ class FissionAuthService
       from_peers.each do |peer|
         # Check namespaceSelector
         if ns_selector = peer.namespace_selector
-          next unless pod_metadata
-
-          unless matches_namespace_selector?(source_namespace.as(String), ns_selector)
-            next
-          end
+          next unless source_namespace
+          next unless matches_selector?(source_namespace.metadata, ns_selector)
         end
 
         # Check podSelector
         if pod_selector = peer.pod_selector
           next unless pod_metadata
-
-          source_pod_labels = pod_metadata["labels"]?.try(&.as_h).as?(Hash(String, String)) || {} of String => String
-          unless matches_pod_selector?(source_pod_labels, pod_selector)
-            next
-          end
+          next unless matches_selector?(pod_metadata, pod_selector)
         end
 
         # Check ipBlock
         if ip_block = peer.ip_block
           nm = Netmask.new(ip_block.not_nil!.cidr)
-          unless nm.matches?(real_ip)
-            next
-          end
+          next unless nm.matches?(real_ip)
         end
 
         # If we got here, this peer matches

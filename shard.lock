@@ -5,7 +5,7 @@ shards:
     version: 0.14.0
 
   kubernetes:
-    git: https://github.com/matchlighter/crystal-kubernetes.git
+    path: ../crystal-kubernetes
     version: 0.1.0+git.commit.9bf385ecdabf10cdd0ce38c4383ba4eea9d0ab7f
 
   netmask:
