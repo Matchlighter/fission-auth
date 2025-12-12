@@ -13,10 +13,12 @@ Kubernetes.import_crd("k8s/crd-functionaccessrule.yaml")
 class FissionAuthService
   @k8s : Kubernetes::Client
   @pod_watcher_url : String
-  @rules_cache = Hash(String, Array(Kubernetes::Resource(FunctionAccessRule))).new
+
   @cache_mutex = Mutex.new
-  @namespace_cache = Hash(String, Hash(String, String)).new
+  @rules_cache = Hash(String, Hash(String, FunctionAccessRule)).new
+
   @namespace_cache_mutex = Mutex.new
+  @namespace_cache = Hash(String, Hash(String, String)).new
 
   def initialize
     @k8s = Kubernetes::Client.new
@@ -45,8 +47,6 @@ class FissionAuthService
           when .deleted?
             @namespace_cache.delete(ns.metadata.name)
             Log.debug { "Removed namespace from cache: #{ns.metadata.name}" }
-          when .error?
-            Log.error { "Error watching namespaces: #{watch.object}" }
           end
         end
       end
@@ -63,40 +63,24 @@ class FissionAuthService
         namespace = rule.metadata.namespace
 
         @cache_mutex.synchronize do
+          @rules_cache[namespace] ||= {} of String => FunctionAccessRule
+
           case watch
           when .added?, .modified?
-            # Reload all rules for this namespace to keep cache consistent
-            begin
-              rules = @k8s.functionaccessrules(namespace: namespace)
-              if rules.size > 0
-                @rules_cache[namespace] = rules.to_a
-              else
-                @rules_cache.delete(namespace)
-              end
-            rescue ex
-              Log.error { "Error reloading rules for namespace #{namespace}: #{ex.message}" }
-            end
+            @rules_cache[namespace][rule.metadata.name] = rule.spec
+            Log.debug { "Updated FunctionAccessRule cache for #{namespace}/#{rule.metadata.name}" }
           when .deleted?
-            # Reload all rules for this namespace
-            begin
-              rules = @k8s.functionaccessrules(namespace: namespace)
-              if rules.size > 0
-                @rules_cache[namespace] = rules.to_a
-              else
-                @rules_cache.delete(namespace)
-              end
-            rescue ex
-              Log.error { "Error reloading rules for namespace #{namespace}: #{ex.message}" }
-            end
+            @rules_cache[namespace].delete(rule.metadata.name)
+            Log.debug { "Removed FunctionAccessRule from cache: #{namespace}/#{rule.metadata.name}" }
           end
         end
       end
     end
   end
 
-  def get_rules_for_namespace(namespace : String) : Array(Kubernetes::Resource(FunctionAccessRule))
+  def get_rules_for_namespace(namespace : String) : Array(FunctionAccessRule)
     @cache_mutex.synchronize do
-      @rules_cache[namespace]? || [] of Kubernetes::Resource(FunctionAccessRule)
+      @rules_cache[namespace].try(&.values) || [] of FunctionAccessRule
     end
   end
 
@@ -214,7 +198,7 @@ class FissionAuthService
 
     # Find matching rules
     matching_rules = rules.select do |rule|
-      matches_pattern?(function_uri.path, rule.spec.target_function)
+      matches_pattern?(function_uri.path, rule.target_function)
     end
 
     if matching_rules.empty?
@@ -230,7 +214,7 @@ class FissionAuthService
     # Evaluate rules with from field
     matching_rules.each do |rule|
       # If no from field, deny (explicit rules required)
-      from_peers = rule.spec.from
+      from_peers = rule.from
       next unless from_peers
 
       # Check if any peer in the from list matches

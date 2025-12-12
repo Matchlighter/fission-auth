@@ -4,7 +4,7 @@ require "log"
 
 require "./src/fission_auth_service"
 
-Log.setup(:info)
+Log.setup_from_env
 
 # Create auth service instance
 auth_service = FissionAuthService.new
