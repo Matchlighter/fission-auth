@@ -47,7 +47,8 @@ server = HTTP::Server.new do |context|
       result[:headers].each do |key, value|
         context.response.headers[key] = value
       end
-      context.response.print("Forbidden: #{result[:reason]}")
+      context.response.print("Forbidden")
+      # context.response.print("Forbidden: #{result[:reason]}")
       Log.info { "✗ Forbidden: #{result[:reason]}" }
     end
   end
