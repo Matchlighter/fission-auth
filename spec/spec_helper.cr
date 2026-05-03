@@ -70,8 +70,17 @@ def create_mock_function_rule(name : String, namespace : String, target_function
   MockFunctionAccessRule.new(name, namespace, target_function, from_peers).as(Kubernetes::Resource(FunctionAccessRule))
 end
 
-# Extension to allow stubbing cache for tests
+# Extension to allow testing private methods and stubbing caches
 class FissionAuthService
+  # Expose private methods for testing
+  def parse_path_pattern_for_test(pattern : String) : Array(Hash(String, String))
+    parse_path_pattern(pattern)
+  end
+
+  def match_path_pattern_for_test(request_path : String, pattern : String) : {matched: Bool, params: Hash(String, String)}
+    match_path_pattern(request_path, pattern)
+  end
+
   def stub_rules_cache(namespace : String, rules : Array(Kubernetes::Resource(FunctionAccessRule)))
     @cache_mutex.synchronize do
       @rules_cache[namespace] = rules

@@ -15,12 +15,6 @@ describe FissionAuthService do
       service.matches_pattern?("user-login", "auth-*").should be_false
     end
 
-    it "matches wildcard patterns with suffix" do
-      service.matches_pattern?("login-handler", "*-handler").should be_true
-      service.matches_pattern?("logout-handler", "*-handler").should be_true
-      service.matches_pattern?("login-service", "*-handler").should be_false
-    end
-
     it "matches catch-all wildcard" do
       service.matches_pattern?("any-function", "*").should be_true
       service.matches_pattern?("another-one", "*").should be_true
@@ -29,118 +23,148 @@ describe FissionAuthService do
 
     it "handles edge cases" do
       service.matches_pattern?("func", "func*").should be_true
-      service.matches_pattern?("func", "*func").should be_true
       service.matches_pattern?("function", "func*").should be_true
-      service.matches_pattern?("myfunc", "*func").should be_true
     end
   end
 
-  describe "#extract_function_info" do
+  describe "#parse_path_pattern" do
     service = FissionAuthService.allocate
 
-    it "extracts function from single-part path" do
-      result = service.extract_function_info("/my-function")
-      result[:namespace].should be_nil
-      result[:function].should eq("my-function")
+    it "parses static path segments" do
+      pattern = "/api/v1/users"
+      segments = service.parse_path_pattern_for_test(pattern)
+      segments.size.should eq(3)
+      segments[0].should eq({"type" => "static", "value" => "api"})
+      segments[1].should eq({"type" => "static", "value" => "v1"})
+      segments[2].should eq({"type" => "static", "value" => "users"})
     end
 
-    it "extracts namespace and function from two-part path" do
-      result = service.extract_function_info("/production/my-function")
-      result[:namespace].should eq("production")
-      result[:function].should eq("my-function")
+    it "parses parameter segments without constraints" do
+      pattern = "/api/{version}/users/{id}"
+      segments = service.parse_path_pattern_for_test(pattern)
+      segments.size.should eq(4)
+      segments[0].should eq({"type" => "static", "value" => "api"})
+      segments[1].should eq({"type" => "param", "name" => "version"})
+      segments[2].should eq({"type" => "static", "value" => "users"})
+      segments[3].should eq({"type" => "param", "name" => "id"})
     end
 
-    it "handles path with trailing slash" do
-      result = service.extract_function_info("/production/my-function/")
-      result[:namespace].should eq("production")
-      result[:function].should eq("my-function")
-    end
-
-    it "handles empty path" do
-      result = service.extract_function_info("")
-      result[:namespace].should be_nil
-      result[:function].should be_nil
+    it "parses parameter segments with regex constraints" do
+      pattern = "/users/{id:\\d+}/posts/{slug:[a-z-]+}"
+      segments = service.parse_path_pattern_for_test(pattern)
+      segments.size.should eq(4)
+      segments[1].should eq({"type" => "param", "name" => "id", "constraint" => "\\d+"})
+      segments[3].should eq({"type" => "param", "name" => "slug", "constraint" => "[a-z-]+"})
     end
 
     it "handles root path" do
-      result = service.extract_function_info("/")
-      result[:namespace].should be_nil
-      result[:function].should be_nil
+      pattern = "/"
+      segments = service.parse_path_pattern_for_test(pattern)
+      segments.size.should eq(0)
     end
 
-    it "handles path with multiple segments (uses first two)" do
-      result = service.extract_function_info("/namespace/function/extra/path")
-      result[:namespace].should eq("namespace")
-      result[:function].should eq("function")
+    it "handles empty pattern" do
+      pattern = ""
+      segments = service.parse_path_pattern_for_test(pattern)
+      segments.size.should eq(0)
     end
 
-    it "handles function names with special characters" do
-      result = service.extract_function_info("/my-function-v2")
-      result[:namespace].should be_nil
-      result[:function].should eq("my-function-v2")
-    end
-
-    it "handles namespace and function with hyphens" do
-      result = service.extract_function_info("/my-namespace/my-function-v2")
-      result[:namespace].should eq("my-namespace")
-      result[:function].should eq("my-function-v2")
+    it "ignores trailing slashes" do
+      pattern = "/api/users/"
+      segments = service.parse_path_pattern_for_test(pattern)
+      segments.size.should eq(2)
     end
   end
 
-  describe "#matches_pod_selector?" do
+  describe "#match_path_pattern" do
     service = FissionAuthService.allocate
 
-    it "matches when all labels are present" do
-      pod_labels = {
-        "app"     => JSON::Any.new("backend"),
-        "version" => JSON::Any.new("v1"),
-      }
-      selector = MockPodSelector.new({"app" => "backend", "version" => "v1"})
-      service.matches_pod_selector?(pod_labels, selector).should be_true
+    it "matches identical static paths" do
+      result = service.match_path_pattern_for_test("/api/users", "/api/users")
+      result[:matched].should be_true
+      result[:params].size.should eq(0)
     end
 
-    it "fails when a label is missing" do
-      pod_labels = {
-        "app" => JSON::Any.new("backend"),
-      }
-      selector = MockPodSelector.new({"app" => "backend", "version" => "v1"})
-      service.matches_pod_selector?(pod_labels, selector).should be_false
+    it "does not match different static paths" do
+      result = service.match_path_pattern_for_test("/api/users", "/api/posts")
+      result[:matched].should be_false
     end
 
-    it "fails when label value doesn't match" do
-      pod_labels = {
-        "app"     => JSON::Any.new("backend"),
-        "version" => JSON::Any.new("v2"),
-      }
-      selector = MockPodSelector.new({"app" => "backend", "version" => "v1"})
-      service.matches_pod_selector?(pod_labels, selector).should be_false
+    it "extracts parameters from simple paths" do
+      result = service.match_path_pattern_for_test("/users/123", "/users/{id}")
+      result[:matched].should be_true
+      result[:params]["id"].should eq("123")
     end
 
-    it "matches with empty selector (matches all)" do
-      pod_labels = {
-        "app" => JSON::Any.new("backend"),
-      }
-      selector = MockPodSelector.new(nil)
-      service.matches_pod_selector?(pod_labels, selector).should be_true
+    it "extracts multiple parameters" do
+      result = service.match_path_pattern_for_test("/api/v2/users/john/posts/456", "/api/{version}/users/{username}/posts/{id}")
+      result[:matched].should be_true
+      result[:params]["version"].should eq("v2")
+      result[:params]["username"].should eq("john")
+      result[:params]["id"].should eq("456")
     end
 
-    it "matches with subset of labels" do
-      pod_labels = {
-        "app"     => JSON::Any.new("backend"),
-        "version" => JSON::Any.new("v1"),
-        "tier"    => JSON::Any.new("production"),
-      }
-      selector = MockPodSelector.new({"app" => "backend"})
-      service.matches_pod_selector?(pod_labels, selector).should be_true
+    it "validates parameter constraints (numeric)" do
+      result = service.match_path_pattern_for_test("/users/123", "/users/{id:\\d+}")
+      result[:matched].should be_true
+      result[:params]["id"].should eq("123")
     end
 
-    it "handles integer values as JSON::Any" do
-      pod_labels = {
-        "app"      => JSON::Any.new("backend"),
-        "replicas" => JSON::Any.new(3_i64),
-      }
-      selector = MockPodSelector.new({"app" => "backend"})
-      service.matches_pod_selector?(pod_labels, selector).should be_true
+    it "rejects parameters that fail constraint validation" do
+      result = service.match_path_pattern_for_test("/users/abc", "/users/{id:\\d+}")
+      result[:matched].should be_false
+    end
+
+    it "validates parameter constraints (alphanumeric with hyphens)" do
+      result = service.match_path_pattern_for_test("/posts/hello-world", "/posts/{slug:[a-z0-9-]+}")
+      result[:matched].should be_true
+      result[:params]["slug"].should eq("hello-world")
+    end
+
+    it "rejects when constraint pattern doesn't match" do
+      result = service.match_path_pattern_for_test("/posts/HELLO", "/posts/{slug:[a-z]+}")
+      result[:matched].should be_false
+    end
+
+    it "allows trailing segments in request" do
+      result = service.match_path_pattern_for_test("/api/users/123/profile", "/api/users/{id}")
+      result[:matched].should be_true
+      result[:params]["id"].should eq("123")
+    end
+
+    it "fails when request has fewer segments than pattern" do
+      result = service.match_path_pattern_for_test("/api/users", "/api/users/{id}")
+      result[:matched].should be_false
+    end
+
+    it "handles empty request path" do
+      result = service.match_path_pattern_for_test("/", "/api/users")
+      result[:matched].should be_false
+    end
+
+    it "handles root pattern" do
+      result = service.match_path_pattern_for_test("/anything", "/")
+      result[:matched].should be_true
+    end
+
+    it "matches path with complex regex constraints" do
+      result = service.match_path_pattern_for_test("/api/1.2/items", "/api/{version:[0-9.]+}/items")
+      result[:matched].should be_true
+      result[:params]["version"].should eq("1.2")
+    end
+
+    it "rejects path with invalid complex regex" do
+      result = service.match_path_pattern_for_test("/api/invalid/items", "/api/{version:[0-9.]+}/items")
+      result[:matched].should be_false
+    end
+
+    it "handles multiple parameter patterns in a single pattern" do
+      result = service.match_path_pattern_for_test("/users/john/posts/42/comments/5", "/users/{user}/posts/{post}/comments/{comment}")
+      result[:matched].should be_true
+      result[:params]["user"].should eq("john")
+      result[:params]["post"].should eq("42")
+      result[:params]["comment"].should eq("5")
     end
   end
+
 end

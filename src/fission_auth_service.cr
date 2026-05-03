@@ -7,7 +7,7 @@ require "netmask"
 # Validates incoming requests to FaaS functions based on CRD access rules
 # Queries pod-watcher service to determine source pod information
 
-# Import the CRD using Kubernetes client
+# Import the CRDs using Kubernetes client
 Kubernetes.import_crd("k8s/crd-functionaccessrule.yaml")
 
 class FissionAuthService
@@ -16,6 +16,7 @@ class FissionAuthService
 
   @namespace_store : Kubernetes::SyncedStore(Kubernetes::Namespace)
   @rules_store : Kubernetes::SyncedStore(Kubernetes::Resource(FunctionAccessRule))
+  @trigger_store : Kubernetes::SyncedStore(Kubernetes::Resource(JSON::Any))
 
   def initialize
     @k8s = Kubernetes::Client.new
@@ -25,6 +26,7 @@ class FissionAuthService
 
     @namespace_store = @k8s.create_synced_store(Kubernetes::Namespace, "api/v1/namespaces")
     @rules_store = @k8s.create_synced_store(Kubernetes::Resource(FunctionAccessRule), "apis/fission.io/v1/functionaccessrules")
+    @trigger_store = @k8s.create_synced_store(Kubernetes::Resource(JSON::Any), "apis/fission.io/v1/httptriggers")
   end
 
   def get_pod_metadata(ip : String) : Kubernetes::Pod::Metadata?
@@ -40,18 +42,132 @@ class FissionAuthService
     nil
   end
 
-  def extract_function_info(path : String) : {namespace: String?, function: String?}
+  # Parse a Fission path pattern into segments, identifying parameters
+  # e.g., "/api/{version}/users/{id}" becomes:
+  # [{type: :static, value: "api"}, {type: :param, name: "version"}, {type: :static, value: "users"}, {type: :param, name: "id"}]
+  private def parse_path_pattern(pattern : String) : Array(Hash(String, String))
+    segments = [] of Hash(String, String)
+    pattern.split("/").each do |segment|
+      next if segment.empty?
+
+      if segment.starts_with?("{") && segment.ends_with?("}")
+        # Parameter: extract name and optional regex constraint
+        inner = segment[1..-2]
+        if inner.includes?(":")
+          name, constraint = inner.split(":", 2)
+          segments << {"type" => "param", "name" => name, "constraint" => constraint}
+        else
+          segments << {"type" => "param", "name" => inner}
+        end
+      else
+        segments << {"type" => "static", "value" => segment}
+      end
+    end
+    segments
+  end
+
+  # Match a request path against a pattern, extracting parameters
+  # Returns {matched: bool, params: Hash(String, String)}
+  private def match_path_pattern(request_path : String, pattern : String) : {matched: Bool, params: Hash(String, String)}
+    pattern_segments = parse_path_pattern(pattern)
+    request_segments = request_path.split("/").reject(&.empty?)
+
+    params = {} of String => String
+    pattern_idx = 0
+    request_idx = 0
+
+    while pattern_idx < pattern_segments.size && request_idx < request_segments.size
+      pattern_seg = pattern_segments[pattern_idx]
+      request_seg = request_segments[request_idx]
+
+      if pattern_seg["type"] == "static"
+        # Static segment must match exactly
+        return {matched: false, params: params} unless pattern_seg["value"] == request_seg
+        pattern_idx += 1
+        request_idx += 1
+      elsif pattern_seg["type"] == "param"
+        # Parameter segment matches if it satisfies constraint
+        if constraint = pattern_seg["constraint"]?
+          # Validate against regex constraint
+          regex = Regex.new("^#{constraint}$")
+          return {matched: false, params: params} unless regex.match(request_seg)
+        end
+        # Capture the parameter
+        params[pattern_seg["name"]] = request_seg
+        pattern_idx += 1
+        request_idx += 1
+      end
+    end
+
+    # Check if we've consumed all pattern segments
+    if pattern_idx == pattern_segments.size
+      # Pattern fully matched
+      # If request has more segments, it's still valid (trailing path allowed)
+      return {matched: true, params: params}
+    else
+      # Pattern not fully matched
+      {matched: false, params: params}
+    end
+  end
+
+  def resolve_url_to_function(request_path : String) : {namespace: String?, function: String?, params: Hash(String, String)}
+    # Query all HTTPTriggers to find a matching route
+    all_triggers = @trigger_store.all
+
+    matching_trigger = all_triggers.each do |trigger|
+      spec = trigger.spec
+      next unless spec.is_a?(JSON::Any)
+
+      # Check relativeurl or path from ingressconfig
+      relative_url = spec["relativeurl"]?.try(&.as_s) || ""
+      ingress_path = spec["ingressconfig"]?.try { |ic| ic["path"]?.try(&.as_s) } || ""
+
+      # Try to match against relativeurl first, then ingress path
+      path_to_match = relative_url.empty? ? ingress_path : relative_url
+      next if path_to_match.empty?
+
+      # Match with full Fission URL parameter support
+      match_result = match_path_pattern(request_path, path_to_match)
+
+      if match_result[:matched]
+        function_ref = trigger.spec["functionref"]
+        function_name = function_ref["name"]?.try(&.as_s) || ""
+
+        return {namespace: trigger.metadata.namespace, function: function_name, params: match_result[:params]}
+      end
+    end
+
+    # Fallback: if no HTTPTrigger found, return nil to indicate resolution failed
+    {namespace: nil, function: nil, params: {} of String => String}
+  end
+
+  def extract_function_info(path : String) : {namespace: String?, function: String?, params: Hash(String, String)}?
     # Path format: /namespace/function or /function
+    # First, try to resolve using HTTPTriggers (the proper way)
+    resolved = resolve_url_to_function(path)
+
+    if resolved[:function]
+      Log.info { "Resolved function via HTTPTrigger: #{resolved[:namespace]}/#{resolved[:function]}" }
+      if resolved[:params].size > 0
+        Log.info { "Extracted URL parameters: #{resolved[:params]}" }
+      end
+      return resolved
+    end
+
+    # Fallback: parse path segments (legacy behavior)
+    # This is kept for compatibility but HTTPTrigger resolution is preferred
     parts = path.split("/").reject(&.empty?)
     parts.shift if parts[0] == ""
 
-    if @namespace_store[parts[0]]
-      # First part is a namespace
-      namespace = parts.shift
-      return {namespace: namespace, function: parts.join("/")}
-    end
+    # if @namespace_store[parts[0]]
+    #   # First part is a namespace
+    #   namespace = parts.shift
+    #   return {namespace: namespace, function: parts.join("/"), params: {} of String => String}
+    # end
 
-    {namespace: "default", function: parts.join("/")}
+    # {namespace: "default", function: parts.join("/"), params: {} of String => String}
+
+    nil
   end
 
   def matches_pattern?(function : String, pattern : String) : Bool
@@ -95,14 +211,14 @@ class FissionAuthService
     # Extract function information from path
     func_info = extract_function_info(request_path)
 
-    unless func_info[:function]
+    if func_info.nil? || !func_info[:function]
       return {allowed: false, reason: "Cannot determine target function", headers: headers}
     end
 
     function_uri = URI.parse(func_info[:function].not_nil!)
     target_namespace = @namespace_store[func_info[:namespace].not_nil!]
 
-    Log.info { "Checking auth for function #{target_namespace}/#{function_uri.path} from IP #{real_ip}" }
+    Log.info { "Checking auth for function #{target_namespace.metadata.name}:#{function_uri.path} from IP #{real_ip}" }
 
     # Get source pod metadata
     pod_metadata = get_pod_metadata(real_ip)
