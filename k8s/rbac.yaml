@@ -14,7 +14,7 @@ rules:
   resources: ["namespaces"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["fission.io"]
-  resources: ["functionaccessrules", "httptriggers"]
+  resources: ["functionaccessrules", "httptriggers", "functions"]
   verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
