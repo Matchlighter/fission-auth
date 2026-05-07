@@ -46,28 +46,45 @@ class MockFunctionAccessRule
   struct MockMetadata
     getter name : String
     getter namespace : String
+    getter labels : Hash(String, String)
 
-    def initialize(@name, @namespace)
+    def initialize(@name, @namespace, @labels = {} of String => String)
+    end
+  end
+
+  struct MockTargetFunction
+    getter name : String?
+    getter match_labels : Hash(String, String)?
+    getter match_expressions : Array(FunctionAccessRule::TargetFunction::MatchExpressions)?
+
+    def initialize(@name, @match_labels = nil, @match_expressions = nil)
     end
   end
 
   struct MockSpec
-    getter target_function : String
+    getter target_function : MockTargetFunction
     getter from : Array(MockFromPeer)?
 
     def initialize(@target_function, @from)
     end
   end
 
-  def initialize(name : String, namespace : String, target_function : String, from_peers : Array(MockFromPeer)?)
+  def initialize(name : String, namespace : String, target_function : MockTargetFunction, from_peers : Array(MockFromPeer)?)
     @metadata = MockMetadata.new(name, namespace)
     @spec = MockSpec.new(target_function, from_peers)
   end
 end
 
 # Helper to create mock FunctionAccessRule resources for testing
-def create_mock_function_rule(name : String, namespace : String, target_function : String, from_peers : Array(MockFromPeer))
-  MockFunctionAccessRule.new(name, namespace, target_function, from_peers).as(Kubernetes::Resource(FunctionAccessRule))
+# target_function can be a String (treated as name) or a MockTargetFunction
+def create_mock_function_rule(name : String, namespace : String, target_function : String | MockFunctionAccessRule::MockTargetFunction, from_peers : Array(MockFromPeer))
+  tf = case target_function
+       in String
+         MockFunctionAccessRule::MockTargetFunction.new(target_function)
+       in MockFunctionAccessRule::MockTargetFunction
+         target_function
+       end
+  MockFunctionAccessRule.new(name, namespace, tf, from_peers).as(Kubernetes::Resource(FunctionAccessRule))
 end
 
 # Extension to allow testing private methods and stubbing caches
@@ -79,17 +96,5 @@ class FissionAuthService
 
   def match_path_pattern_for_test(request_path : String, pattern : String) : {matched: Bool, params: Hash(String, String)}
     match_path_pattern(request_path, pattern)
-  end
-
-  def stub_rules_cache(namespace : String, rules : Array(Kubernetes::Resource(FunctionAccessRule)))
-    @cache_mutex.synchronize do
-      @rules_cache[namespace] = rules
-    end
-  end
-
-  def stub_namespace_cache(cache : Hash(String, Hash(String, String)))
-    @namespace_cache_mutex.synchronize do
-      @namespace_cache = cache
-    end
   end
 end

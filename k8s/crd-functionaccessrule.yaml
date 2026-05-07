@@ -19,8 +19,34 @@ spec:
                 - targetFunction
               properties:
                 targetFunction:
-                  type: string
-                  description: "Name or pattern of the function this rule applies to (* for all)"
+                  type: object
+                  description: "Target function selector. Use 'name' for name/pattern/regex matching, 'matchLabels'/'matchExpressions' for label-based selection. Patterns: exact name, glob (prefix*), or regex (/pattern/)."
+                  properties:
+                    name:
+                      type: string
+                      nullable: true
+                      description: "Function name, glob pattern (* or prefix*), or regex (/pattern/)"
+                    matchLabels:
+                      type: object
+                      nullable: true
+                      description: "Select functions by label key-value pairs (AND logic)"
+                      additionalProperties:
+                        type: string
+                    matchExpressions:
+                      type: array
+                      nullable: true
+                      description: "Select functions by label expressions"
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                          values:
+                            type: array
+                            items:
+                              type: string
 
                 from:
                   type: array

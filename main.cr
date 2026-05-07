@@ -27,7 +27,8 @@ server = HTTP::Server.new do |context|
     # Forward auth check
     real_ip = context.request.headers["X-Real-IP"]? ||
               context.request.headers["X-Forwarded-For"]?.try(&.split(",").first.strip) ||
-              context.request.remote_address.try(&.to_s) || "unknown"
+              context.request.remote_address.as?(Socket::IPAddress).try(&.address) ||
+              "unknown"
 
     request_path = context.request.headers["X-Forwarded-Uri"]? || context.request.path
 

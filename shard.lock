@@ -6,7 +6,7 @@ shards:
 
   kubernetes:
     git: https://github.com/matchlighter/crystal-kubernetes.git
-    version: 0.1.0+git.commit.e0195db978301a81e3f8e29829c5e83415cd7251
+    version: 0.1.0+git.commit.77509b80abdfa1b58cf7d8eb6c45b5c5c85d079e
 
   netmask:
     git: https://github.com/plambert/netmask.cr.git

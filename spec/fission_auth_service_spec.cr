@@ -1,29 +1,41 @@
 require "./spec_helper"
 
 describe FissionAuthService do
-  describe "#matches_pattern?" do
+  describe "#matches_string_pattern?" do
     service = FissionAuthService.allocate
 
     it "matches exact function names" do
-      service.matches_pattern?("my-function", "my-function").should be_true
-      service.matches_pattern?("my-function", "other-function").should be_false
+      service.matches_string_pattern?("my-function", "my-function").should be_true
+      service.matches_string_pattern?("my-function", "other-function").should be_false
     end
 
     it "matches wildcard patterns with prefix" do
-      service.matches_pattern?("auth-login", "auth-*").should be_true
-      service.matches_pattern?("auth-logout", "auth-*").should be_true
-      service.matches_pattern?("user-login", "auth-*").should be_false
+      service.matches_string_pattern?("auth-login", "auth-*").should be_true
+      service.matches_string_pattern?("auth-logout", "auth-*").should be_true
+      service.matches_string_pattern?("user-login", "auth-*").should be_false
     end
 
     it "matches catch-all wildcard" do
-      service.matches_pattern?("any-function", "*").should be_true
-      service.matches_pattern?("another-one", "*").should be_true
-      service.matches_pattern?("", "*").should be_true
+      service.matches_string_pattern?("any-function", "*").should be_true
+      service.matches_string_pattern?("another-one", "*").should be_true
+      service.matches_string_pattern?("", "*").should be_true
     end
 
     it "handles edge cases" do
-      service.matches_pattern?("func", "func*").should be_true
-      service.matches_pattern?("function", "func*").should be_true
+      service.matches_string_pattern?("func", "func*").should be_true
+      service.matches_string_pattern?("function", "func*").should be_true
+    end
+
+    it "matches regex patterns delimited by slashes" do
+      service.matches_string_pattern?("auth-login", "/auth-.*/").should be_true
+      service.matches_string_pattern?("user-login", "/auth-.*/").should be_false
+      service.matches_string_pattern?("api-v2", "/api-v\\d+/").should be_true
+      service.matches_string_pattern?("api-beta", "/api-v\\d+/").should be_false
+    end
+
+    it "treats single slash as exact match not regex" do
+      service.matches_string_pattern?("/", "/").should be_true
+      service.matches_string_pattern?("other", "/").should be_false
     end
   end
 

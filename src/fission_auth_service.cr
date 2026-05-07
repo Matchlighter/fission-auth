@@ -3,6 +3,8 @@ require "kubernetes"
 require "uri"
 require "netmask"
 
+require "./multibimap"
+
 # Fission Forward Auth Microservice
 # Validates incoming requests to FaaS functions based on CRD access rules
 # Queries pod-watcher service to determine source pod information
@@ -10,13 +12,24 @@ require "netmask"
 # Import the CRDs using Kubernetes client
 Kubernetes.import_crd("k8s/crd-functionaccessrule.yaml")
 
+def resource_uid(resource) : String
+  "#{resource.metadata.namespace}/#{resource.metadata.name}"
+end
+
 class FissionAuthService
+  alias FunctionResource = Kubernetes::Resource(JSON::Any)
+  alias RuleResource = Kubernetes::Resource(FunctionAccessRule)
+
   @k8s : Kubernetes::Client
   @pod_watcher_url : String
 
   @namespace_store : Kubernetes::SyncedStore(Kubernetes::Namespace)
-  @rules_store : Kubernetes::SyncedStore(Kubernetes::Resource(FunctionAccessRule))
+  @rules_store : Kubernetes::SyncedStore(RuleResource)
   @trigger_store : Kubernetes::SyncedStore(Kubernetes::Resource(JSON::Any))
+  @function_store : Kubernetes::SyncedStore(Kubernetes::Resource(JSON::Any))
+
+  @index_mutex : Mutex
+  @fn_rule_map : MultiBiMap(String, String) # MultiBiMap(Function.uid, Rule.uid)
 
   def initialize
     @k8s = Kubernetes::Client.new
@@ -24,9 +37,48 @@ class FissionAuthService
     Log.info { "Initialized Fission Auth Service" }
     Log.info { "Pod Watcher URL: #{@pod_watcher_url}" }
 
+    @index_mutex = Mutex.new
+    @fn_rule_map = MultiBiMap(String, String).new
+
     @namespace_store = @k8s.create_synced_store(Kubernetes::Namespace, "api/v1/namespaces")
-    @rules_store = @k8s.create_synced_store(Kubernetes::Resource(FunctionAccessRule), "apis/fission.io/v1/functionaccessrules")
+    @rules_store = @k8s.create_synced_store(RuleResource, "apis/fission.io/v1/functionaccessrules")
     @trigger_store = @k8s.create_synced_store(Kubernetes::Resource(JSON::Any), "apis/fission.io/v1/httptriggers")
+    # TODO Only need to track Function metadata
+    @function_store = @k8s.create_synced_store(FunctionResource, "apis/fission.io/v1/functions")
+
+    @rules_store.on_change do |watch|
+      @index_mutex.synchronize do
+        resource = watch.object
+        rule_uid = resource_uid(resource)
+
+        @fn_rule_map.delete_right(rule_uid)
+
+        if watch.added? || watch.modified?
+          @function_store.all_for(resource.metadata.namespace).each do |func|
+            if selector_matches?(resource.spec.target_function, func.metadata)
+              @fn_rule_map.add(resource_uid(func), rule_uid)
+            end
+          end
+        end
+      end
+    end
+
+    @function_store.on_change do |watch|
+      @index_mutex.synchronize do
+        resource = watch.object
+        func_uid = resource_uid(resource)
+
+        @fn_rule_map.delete_left(func_uid)
+
+        if watch.added? || watch.modified?
+          @rules_store.all_for(resource.metadata.namespace).each do |rule|
+            if selector_matches?(rule.spec.target_function, resource.metadata)
+              @fn_rule_map.add(func_uid, resource_uid(rule))
+            end
+          end
+        end
+      end
+    end
   end
 
   def get_pod_metadata(ip : String) : Kubernetes::Pod::Metadata?
@@ -110,7 +162,7 @@ class FissionAuthService
     end
   end
 
-  def resolve_url_to_function(request_path : String) : {namespace: String?, function: String?, params: Hash(String, String)}
+  def resolve_url_to_function(request_path : String) : FunctionResource?
     # Query all HTTPTriggers to find a matching route
     all_triggers = @trigger_store.all
 
@@ -132,93 +184,69 @@ class FissionAuthService
       if match_result[:matched]
         function_ref = trigger.spec["functionref"]
         function_name = function_ref["name"]?.try(&.as_s) || ""
-
-        return {namespace: trigger.metadata.namespace, function: function_name, params: match_result[:params]}
+        return @function_store["#{trigger.metadata.namespace.not_nil!}/#{function_name}"]
       end
     end
 
     # Fallback: if no HTTPTrigger found, return nil to indicate resolution failed
-    {namespace: nil, function: nil, params: {} of String => String}
-  end
-
-  def extract_function_info(path : String) : {namespace: String?, function: String?, params: Hash(String, String)}?
-    # Path format: /namespace/function or /function
-    # First, try to resolve using HTTPTriggers (the proper way)
-    resolved = resolve_url_to_function(path)
-
-    if resolved[:function]
-      Log.info { "Resolved function via HTTPTrigger: #{resolved[:namespace]}/#{resolved[:function]}" }
-      if resolved[:params].size > 0
-        Log.info { "Extracted URL parameters: #{resolved[:params]}" }
-      end
-      return resolved
-    end
-
-    # Fallback: parse path segments (legacy behavior)
-    # This is kept for compatibility but HTTPTrigger resolution is preferred
-    parts = path.split("/").reject(&.empty?)
-    parts.shift if parts[0] == ""
-
-    # if @namespace_store[parts[0]]
-    #   # First part is a namespace
-    #   namespace = parts.shift
-    #   return {namespace: namespace, function: parts.join("/"), params: {} of String => String}
-    # end
-
-    # {namespace: "default", function: parts.join("/"), params: {} of String => String}
-
     nil
   end
 
-  def matches_pattern?(function : String, pattern : String) : Bool
-    function = function + "/" unless function.ends_with?("/")
-
+  def matches_string_pattern?(name : String, pattern : String) : Bool
     if pattern == "*"
       true
+    elsif pattern.starts_with?("/") && pattern.ends_with?("/") && pattern.size > 1
+      !!Regex.new(pattern[1..-2]).match(name)
     elsif pattern.ends_with?("*")
-      prefix = pattern[0..-2]
-      function.starts_with?(prefix)
+      name.starts_with?(pattern[0..-2])
     else
-      function == pattern || function == (pattern + "/")
+      name == pattern
     end
   end
 
-  def matches_selector?(meta, selector) : Bool
-    # Check name
-    if selector.responds_to?(:name) && (match_name = selector.name)
-      return false unless match_name == meta.name
+  def selector_matches?(selector, resource_meta)
+    name = resource_meta.name
+    labels = resource_meta.labels || {} of String => String
+
+    if selector.responds_to?(:name) && (filt_name = selector.name)
+      return false unless matches_string_pattern?(name, filt_name)
     end
 
-    # Check matchLabels
     if match_labels = selector.match_labels
-      obj_labels = meta.labels
       match_labels.each do |key, value|
-        # Convert JSON::Any to String for comparison
-        return false unless obj_labels[key]? == value
+        return false unless labels[key]? == value
       end
     end
 
-    # TODO: Implement matchExpressions
-
+    if match_expressions = selector.match_expressions
+      match_expressions.each do |expr|
+        label_value = labels[expr.key]?
+        case expr.operator
+        when "In"           then return false unless label_value && expr.values.includes?(label_value)
+        when "NotIn"        then return false if label_value && expr.values.includes?(label_value)
+        when "Exists"       then return false unless label_value
+        when "DoesNotExist" then return false if label_value
+        end
+      end
+    end
+    
     true
-  rescue
-    false
   end
 
   def check_authorization(real_ip : String, request_path : String) : {allowed: Bool, reason: String, headers: Hash(String, String)}
     headers = {} of String => String
 
     # Extract function information from path
-    func_info = extract_function_info(request_path)
+    function = resolve_url_to_function(request_path)
 
-    if func_info.nil? || !func_info[:function]
+    if function.nil?
       return {allowed: false, reason: "Cannot determine target function", headers: headers}
     end
 
-    function_uri = URI.parse(func_info[:function].not_nil!)
-    target_namespace = @namespace_store[func_info[:namespace].not_nil!]
+    function_name = function.metadata.name
+    target_namespace = @namespace_store[function.metadata.namespace.not_nil!].not_nil!
 
-    Log.info { "Checking auth for function #{target_namespace.metadata.name}:#{function_uri.path} from IP #{real_ip}" }
+    Log.info { "Checking auth for function #{target_namespace.metadata.name}:#{function_name} from IP #{real_ip}" }
 
     # Get source pod metadata
     pod_metadata = get_pod_metadata(real_ip)
@@ -230,14 +258,14 @@ class FissionAuthService
     headers["X-Source-Pod"] = pod_metadata.try(&.name) || ""
     headers["X-Source-Type"] = pod_metadata ? "cluster" : "external"
 
-    # Find matching rules
-    namespace_rules = @rules_store.all_for(target_namespace).map(&.spec)
-    matching_rules = namespace_rules.select do |rule|
-      matches_pattern?(function_uri.path, rule.target_function)
+    # Find matching rules via pre-built index
+    matching_rules = @index_mutex.synchronize do
+      rule_ids = @fn_rule_map.for_left(resource_uid(function))
+      rule_ids.map { |rid| @rules_store[rid] }.compact.map(&.spec).compact
     end
 
     if matching_rules.empty?
-      Log.info { "No rules match function #{function_uri.path}" }
+      Log.info { "No rules match function #{function_name}" }
       # No explicit rule - default deny for cross-namespace
       if source_namespace == target_namespace
         return {allowed: true, reason: "Same namespace (no matching rule)", headers: headers}
@@ -257,13 +285,13 @@ class FissionAuthService
         # Check namespaceSelector
         if ns_selector = peer.namespace_selector
           next unless source_namespace
-          next unless matches_selector?(source_namespace.metadata, ns_selector)
+          next unless selector_matches?(ns_selector, source_namespace.metadata)
         end
 
         # Check podSelector
         if pod_selector = peer.pod_selector
           next unless pod_metadata
-          next unless matches_selector?(pod_metadata, pod_selector)
+          next unless selector_matches?(pod_selector, pod_metadata)
         end
 
         # Check ipBlock
