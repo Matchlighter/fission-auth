@@ -85,7 +85,7 @@ class FissionAuthService
     response = HTTP::Client.get("#{@pod_watcher_url}/pod?ip=#{ip}")
 
     if response.status_code == 200
-      Kubernetes::Pod::Metadata.from_json(response.body_io)
+      Kubernetes::Pod::Metadata.from_json(response.body)
     else
       nil
     end
